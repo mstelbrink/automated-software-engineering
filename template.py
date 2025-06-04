@@ -3,7 +3,12 @@ import json
 import os
 import requests
 import subprocess
+from dotenv import load_dotenv
 
+load_dotenv()
+
+API_KEY=os.getenv("API_KEY")
+BASE_URL="http://188.245.32.59:4000/"
 API_URL = "http://localhost:8081/task/index/"
 REPOS_DIR = "repos"
 
