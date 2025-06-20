@@ -1,11 +1,15 @@
 import asyncio
 import json
 import os
+from mcp import ClientSession, StdioServerParameters, stdio_client
 import requests
 import subprocess
-from praisonaiagents import Agent, Agents, MCP
 from dotenv import load_dotenv
-from prompts import planner_prompt, coder_prompt, tester_prompt
+from langchain import hub
+from langchain_litellm import ChatLiteLLM
+from langchain_mcp_adapters.client import load_mcp_tools
+from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
 
@@ -14,15 +18,15 @@ BASE_URL=os.getenv("BASE_URL")
 API_URL = "http://localhost:8081/task/index/"
 TEST_URL = "http://localhost:8082/test"
 REPOS_DIR = "repos"
-LOG_FILE = "results_praisonai.log"
+LOG_FILE = "results_langchain.log"
 
-llm_config = {
-    "model": "gpt-4o",
-    "temperature": 0,
-    "max_tokens": 4096,
-    "api_key": API_KEY,
-    "base_url": BASE_URL,
-}
+os.environ["OPENAI_API_KEY"] = API_KEY
+os.environ["OPENAI_BASE_URL"] = BASE_URL
+
+server_params = StdioServerParameters(
+    command="npx",
+    args=["-y", "@modelcontextprotocol/server-filesystem", os.getcwd() + "/repos"]
+)
 
 async def handle_task(index):
 
@@ -45,50 +49,31 @@ async def handle_task(index):
             subprocess.run(["git", "clone", repo_url, repo_dir])
         subprocess.run(["git", "checkout", commit_hash], cwd=repo_dir)
 
-        allowed_dir = os.getcwd() + "/repos"
-        allowed_dirs = [
-            allowed_dir
-        ]
+        llm = ChatLiteLLM(model="gpt-4o-mini", temperature=0)
 
-        tools = MCP("npx -y @modelcontextprotocol/server-filesystem", args=allowed_dirs)
+        prompt = hub.pull("hwchase17/openai-functions-agent")
 
-        planner = Agent(
-            instructions=planner_prompt,
-            llm=llm_config
-        )
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                # Initialize the connection
+                await session.initialize()
 
-        coder = Agent(
-            instructions=coder_prompt,
-            llm=llm_config,
-            tools=tools
-        )
+                # Get tools
+                tools = await load_mcp_tools(session)
 
-        tester = Agent(
-            instructions=tester_prompt,
-            llm=llm_config,
-            tools=tools
-        )
+                # Create and run the agent
+                agent = create_tool_calling_agent(llm, tools, prompt)
+                agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+                await agent_executor.invoke({"input": "Create a file called fruits.txt with the content peach inside your allowed directory."})
 
-        agents = Agents(agen=[planner, coder, tester])
-
-        full_prompt = (
-                f"Work in the directory: {allowed_dir}/repo_{index}. This is a Git repository.\n"
-                f"Your goal is to fix the problem described below.\n"
-                f"All code changes must be saved to the files, so they appear in `git diff`.\n"
-                f"Problem description:\n"
-                f"{issue}\n\n"
-                f"Make sure the fix is minimal and only touches what's necessary to resolve the failing tests."
-            )
-
-        agents.start(task_content=full_prompt)
-
+        # Call REST service instead for evaluation changes from agent
+        print(f"Calling SWE-Bench REST service with repo: {repo_dir}")
         test_payload = {
             "instance_id": instance_id,
-            "repoDir": f"/repos/repo_{index}",
+            "repoDir": f"/repos/repo_{index}",  # mount with docker
             "FAIL_TO_PASS": fail_tests,
             "PASS_TO_PASS": pass_tests
         }
-
         res = requests.post(TEST_URL, json=test_payload)
         res.raise_for_status()
         result_raw = res.json().get("harnessOutput", "{}")
@@ -120,8 +105,8 @@ async def handle_task(index):
         print(f"Error in test case {index}: {e}")
 
 async def main():
-    for i in range(1, 301):
-        await handle_task(i)
+    # for i in range(1, 301):
+    await handle_task(4)
 
 
 if __name__ == "__main__":

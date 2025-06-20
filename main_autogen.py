@@ -1,5 +1,4 @@
 import asyncio
-from autogen_ext.models.ollama import OllamaChatCompletionClient
 from autogen_ext.models.openai import OpenAIChatCompletionClient
 from autogen_ext.tools.mcp import StdioServerParams, mcp_server_tools
 from autogen_agentchat.agents import AssistantAgent
@@ -16,10 +15,11 @@ from prompts import planner_prompt, coder_prompt, tester_prompt
 load_dotenv()
 
 API_KEY=os.getenv("API_KEY")
-BASE_URL="http://188.245.32.59:4000/"
+BASE_URL=os.getenv("BASE_URL")
 API_URL = "http://localhost:8081/task/index/"
+TEST_URL = "http://localhost:8082/test"
 REPOS_DIR = "repos"
-LOG_FILE = "results.log"
+LOG_FILE = "results_autogen.log"
 
 litellm_model_client = OpenAIChatCompletionClient(
     model="gpt-4o",
@@ -99,7 +99,7 @@ async def handle_task(index):
             "FAIL_TO_PASS": fail_tests,
             "PASS_TO_PASS": pass_tests
         }
-        res = requests.post("http://localhost:8082/test", json=test_payload)
+        res = requests.post(TEST_URL, json=test_payload)
         res.raise_for_status()
         result_raw = res.json().get("harnessOutput", "{}")
         result_json = json.loads(result_raw)
@@ -120,7 +120,6 @@ async def handle_task(index):
             log.write(f"\n--- TESTCASE {index} ---\n")
             log.write(f"FAIL_TO_PASS passed: {fail_pass_passed}/{fail_pass_total}\n")
             log.write(f"PASS_TO_PASS passed: {pass_pass_passed}/{pass_pass_total}\n")
-            # log.write(f"Total Tokens Used: {token_total}\n")
         print(f"Test case {index} completed and logged.")
 
     except Exception as e:
@@ -131,7 +130,7 @@ async def handle_task(index):
         print(f"Error in test case {index}: {e}")
 
 async def main():
-    for i in range(1, 11):
+    for i in range(1, 301):
         await handle_task(i)
 
 
