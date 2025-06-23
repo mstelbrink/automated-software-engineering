@@ -1,15 +1,15 @@
 import asyncio
 import json
 import os
-from mcp import ClientSession, StdioServerParameters, stdio_client
+from langchain_openai import ChatOpenAI
+from langchain_mcp_adapters.client import MultiServerMCPClient
 import requests
 import subprocess
 from dotenv import load_dotenv
-from langchain import hub
-from langchain_litellm import ChatLiteLLM
-from langchain_mcp_adapters.client import load_mcp_tools
-from langchain.agents import create_tool_calling_agent, AgentExecutor
+from langchain.agents import create_tool_calling_agent, create_react_agent, AgentExecutor
 from langchain_core.prompts import ChatPromptTemplate
+from langchain import hub
+from prompts import planner_prompt, coder_prompt, tester_prompt
 
 load_dotenv()
 
@@ -23,15 +23,11 @@ LOG_FILE = "results_langchain.log"
 os.environ["OPENAI_API_KEY"] = API_KEY
 os.environ["OPENAI_BASE_URL"] = BASE_URL
 
-server_params = StdioServerParameters(
-    command="npx",
-    args=["-y", "@modelcontextprotocol/server-filesystem", os.getcwd() + "/repos"]
-)
-
 async def handle_task(index):
 
     repo_dir = f"{REPOS_DIR}/repo_{index}"
     start_dir = os.getcwd()
+    allowed_dir = os.getcwd() + "/repos"
 
     try:
         response = requests.get(f"{API_URL}{index}")
@@ -49,22 +45,49 @@ async def handle_task(index):
             subprocess.run(["git", "clone", repo_url, repo_dir])
         subprocess.run(["git", "checkout", commit_hash], cwd=repo_dir)
 
-        llm = ChatLiteLLM(model="gpt-4o-mini", temperature=0)
+        llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-        prompt = hub.pull("hwchase17/openai-functions-agent")
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", "You are a helpful assistant"),
+                ("placeholder", "{chat_history}"),
+                ("human", "{input}"),
+                ("placeholder", "{agent_scratchpad}"),
+            ]
+        )
 
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                # Initialize the connection
-                await session.initialize()
+        client = MultiServerMCPClient(
+            {
+                "filesystem": {
+                    "command": "npx",
+                    "args": [
+                        "-y",
+                        "@modelcontextprotocol/server-filesystem",
+                        allowed_dir
+                    ],
+                    "transport": "stdio",
+                },
+            }
+        )
 
-                # Get tools
-                tools = await load_mcp_tools(session)
+        planner_tools = []
+        mcp_tools = await client.get_tools()
 
-                # Create and run the agent
-                agent = create_tool_calling_agent(llm, tools, prompt)
-                agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
-                await agent_executor.invoke({"input": "Create a file called fruits.txt with the content peach inside your allowed directory."})
+        # Create and run the agent
+        planner = create_tool_calling_agent(llm, mcp_tools, prompt)
+        coder = create_tool_calling_agent(llm, mcp_tools, prompt)
+        tester = create_tool_calling_agent(llm, mcp_tools, prompt)
+
+        planner_agent_executor = AgentExecutor(agent=planner, tools=planner_tools, verbose=True)
+        coder_agent_executor = AgentExecutor(agent=coder, tools=mcp_tools, verbose=True)
+        tester_agent_executor = AgentExecutor(agent=tester, tools=mcp_tools, verbose=True)
+
+        for i in range(25):
+            planner_output = await planner_agent_executor.ainvoke({"input": issue})
+            coder_output = await coder_agent_executor.ainvoke({"input": f"Solve the following tasks:\n {planner_output}\nApply your changes to the respective files."})
+            tester_output = await tester_agent_executor.ainvoke({"input": tester_prompt + "\nIf everything fits your expectations output the string TERMINATE"})
+            if ("TERMINATE" in tester_output):
+                break
 
         # Call REST service instead for evaluation changes from agent
         print(f"Calling SWE-Bench REST service with repo: {repo_dir}")
@@ -105,8 +128,8 @@ async def handle_task(index):
         print(f"Error in test case {index}: {e}")
 
 async def main():
-    # for i in range(1, 301):
-    await handle_task(4)
+    for i in range(1, 301):
+        await handle_task(i)
 
 
 if __name__ == "__main__":
